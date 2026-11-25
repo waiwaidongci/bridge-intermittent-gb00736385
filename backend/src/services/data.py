@@ -10,9 +10,10 @@ from sqlalchemy import insert, select
 from sqlalchemy.exc import IntegrityError
 
 from src.models.database import add_event, engine
-from src.models.tables import datasets
+from src.models.tables import backfills, datasets
 
 PROFILE = json.loads(Path(__file__).with_name('domain.json').read_text(encoding='utf-8'))
+BOM = '﻿'
 
 
 def convert(value, field):
@@ -33,14 +34,13 @@ def convert(value, field):
     return number
 
 
-def csv_records(text):
-    reader = csv.DictReader(io.StringIO(text.lstrip('\ufeff'), newline=''), strict=True)
-    columns = PROFILE['columns']
+def _csv_rows(text, columns, max_rows=5000):
+    reader = csv.DictReader(io.StringIO(text.lstrip(BOM), newline=''), strict=True)
+    required = {field['key'] for field in columns}
     try:
         fieldnames = reader.fieldnames
     except csv.Error as error:
         raise ValueError('CSV 表头的引号格式有误。') from error
-    required = {field['key'] for field in columns}
     if not fieldnames or len(fieldnames) != len(required) or set(fieldnames) != required:
         raise ValueError('CSV 表头须为 ' + '、'.join(field['key'] for field in columns))
     rows = []
@@ -55,12 +55,28 @@ def csv_records(text):
                 except (ValueError, TypeError, OverflowError) as error:
                     raise ValueError(f"第 {reader.line_num} 行 {field['label']} 无效（{error}）。") from error
             rows.append(normalized)
-            if len(rows) > 5000:
-                raise ValueError('单份数据最多 5000 行。')
+            if len(rows) > max_rows:
+                raise ValueError(f'单份数据最多 {max_rows} 行。')
     except csv.Error as error:
         raise ValueError('CSV 引号或字段格式有误。') from error
     if not rows:
         raise ValueError('CSV 需要至少一条数据。')
+    return rows
+
+
+def csv_records(text):
+    return _csv_rows(text, PROFILE['columns'])
+
+
+def backfill_records(text):
+    """Parse a late work-order backfill CSV (sku, week, posted_at, added_qty)."""
+    rows = _csv_rows(text, PROFILE['backfill_columns'])
+    seen = set()
+    for index, row in enumerate(rows, start=2):
+        key = (row['sku'], row['week'])
+        if key in seen:
+            raise ValueError(f"第 {index} 行 {row['sku']} {row['week']} 在同一补录批次中重复，请汇总同周补录。")
+        seen.add(key)
     return rows
 
 
@@ -77,21 +93,21 @@ def parse_options(values):
     return output
 
 
-def save_revision(name, records, owner):
+def _save_revision(table, name, records, owner):
     if not name.strip():
         raise ValueError('数据名称不能为空。')
     payload = json.dumps(records, sort_keys=True, ensure_ascii=False, separators=(',', ':'), allow_nan=False)
     checksum = hashlib.sha256(payload.encode()).hexdigest()
     now = time.time()
-    existing = select(datasets.c.id).where(datasets.c.checksum == checksum)
+    existing = select(table.c.id).where(table.c.checksum == checksum)
     try:
         with engine.begin() as connection:
             found = connection.scalar(existing)
             if found is not None:
                 return found, False
-            key = connection.execute(insert(datasets).values(name=name.strip(), owner=owner, records=records,
-                                                             checksum=checksum, created=now)).inserted_primary_key[0]
-            add_event(connection, owner, 'import', key, now)
+            key = connection.execute(insert(table).values(name=name.strip(), owner=owner, records=records,
+                                                           checksum=checksum, created=now)).inserted_primary_key[0]
+            add_event(connection, owner, 'import' if table is datasets else 'backfill', key, now)
             return key, True
     except IntegrityError:
         with engine.connect() as connection:
@@ -99,3 +115,11 @@ def save_revision(name, records, owner):
             if found is None:
                 raise
             return found, False
+
+
+def save_revision(name, records, owner):
+    return _save_revision(datasets, name, records, owner)
+
+
+def save_backfill(name, records, owner):
+    return _save_revision(backfills, name, records, owner)

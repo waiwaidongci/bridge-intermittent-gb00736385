@@ -4,11 +4,12 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 
 from src.config.settings import ARTIFACTS
 from src.constants.enums import Role
-from src.controllers.query import delivery_status, jobs, recent_activity, require_row, revisions
-from src.models.tables import datasets, runs
-from src.schemas.requests import Delivery, Import, Login, Review, Run
-from src.services.data import PROFILE, csv_records, save_revision
-from src.services.domain import sample_rows
+from src.controllers.query import (backfill_batches, delivery_status, jobs, recent_activity,
+                                   require_row, revisions)
+from src.models.tables import backfills, datasets, runs
+from src.schemas.requests import BackfillImport, Delivery, Import, Login, Review, Run
+from src.services.data import PROFILE, backfill_records, csv_records, save_backfill, save_revision
+from src.services.domain import sample_backfills, sample_rows
 from src.services.workflow import add_run, cancel_schedule, review_run, schedule_report
 from src.utils.exports import write_csv
 from src.utils.security import allowed, authenticate, signed_in
@@ -43,6 +44,12 @@ def example(account=Depends(signed_in)):
     return download_csv(write_csv(sample_rows(), [c['key'] for c in PROFILE['columns']], False), PROFILE['filename'])
 
 
+@router.get('/backfill-example.csv')
+def backfill_example(account=Depends(signed_in)):
+    return download_csv(write_csv(sample_backfills(), [c['key'] for c in PROFILE['backfill_columns']], False),
+                        PROFILE['backfill_filename'])
+
+
 @router.get('/datasets')
 def list_datasets(account=Depends(signed_in)):
     return revisions()
@@ -59,6 +66,25 @@ def get_dataset(key: int, account=Depends(signed_in)):
 def import_data(body: Import, account=Depends(analyst)):
     rows = csv_records(body.csv)
     key, created = save_revision(body.name, rows, account['username'])
+    return {'id': key, 'created': created, 'rows': len(rows)}
+
+
+@router.get('/backfills')
+def list_backfills(account=Depends(signed_in)):
+    return backfill_batches()
+
+
+@router.get('/backfills/{key}')
+def get_backfill(key: int, account=Depends(signed_in)):
+    batch = require_row(backfills, key, '补录批次')
+    records = batch.pop('records')
+    return {**batch, 'count': len(records), 'records': records}
+
+
+@router.post('/backfills', status_code=201)
+def import_backfill(body: BackfillImport, account=Depends(analyst)):
+    rows = backfill_records(body.csv)
+    key, created = save_backfill(body.name, rows, account['username'])
     return {'id': key, 'created': created, 'rows': len(rows)}
 
 
@@ -112,3 +138,15 @@ def report(key: int, account=Depends(signed_in)):
     path = ARTIFACTS / f"run-{key}-{run['started'].hex()}.csv"
     data = path.read_bytes() if path.exists() else write_csv(run['result']['rows'], run['result'].get('columns'))
     return download_csv(data, f"{PROFILE['title']}-{key}.csv")
+
+
+@router.get('/runs/{key}/backtest.csv')
+def backtest_report(key: int, account=Depends(signed_in)):
+    run = require_row(runs, key, '分析任务')
+    if run['decision'] != 'approved' and account['role'] == Role.viewer.value:
+        raise HTTPException(403, '只读账号可导出已批准的报告。')
+    result = run['result']
+    if not result or not result.get('windows'):
+        raise HTTPException(409, '逐窗口回测结果尚不可导出。')
+    data = write_csv(result['windows'], result.get('window_columns'))
+    return download_csv(data, f"{PROFILE['title']}-回测窗口-{key}.csv")

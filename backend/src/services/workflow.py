@@ -5,7 +5,7 @@ from sqlalchemy import and_, insert, or_, select, update
 
 from src.constants.enums import State
 from src.models.database import add_event, engine, fetch_one
-from src.models.tables import datasets, deliveries, runs, schedules
+from src.models.tables import backfills, datasets, deliveries, runs, schedules
 from src.services.data import parse_options
 
 
@@ -15,7 +15,10 @@ def add_run(body, actor):
     with engine.begin() as connection:
         if fetch_one(connection, datasets, body.dataset_id) is None:
             raise HTTPException(404, '数据版本不存在。')
-        key = connection.execute(insert(runs).values(dataset_id=body.dataset_id, options=options,
+        if body.backfill_id is not None and fetch_one(connection, backfills, body.backfill_id) is None:
+            raise HTTPException(404, '补录批次不存在。')
+        key = connection.execute(insert(runs).values(dataset_id=body.dataset_id,
+                    backfill_id=body.backfill_id, options=options,
                     state=State.queued.value, owner=actor, created=now)).inserted_primary_key[0]
         add_event(connection, actor, 'queue', key, now)
     return {'id': key, 'state': State.queued.value}
@@ -34,7 +37,8 @@ def claim_run():
         if claim.rowcount != 1:
             return None
         data = fetch_one(connection, datasets, run['dataset_id'])
-        return key, now, data['records'], run['options']
+        batch = fetch_one(connection, backfills, run['backfill_id']) if run['backfill_id'] is not None else None
+        return key, now, data['records'], run['options'], batch['records'] if batch else []
 
 
 def finish_run(key, claim, result, error):

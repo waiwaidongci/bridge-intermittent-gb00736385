@@ -14,8 +14,14 @@ class Import(BaseModel):
     csv: str = Field(min_length=1, max_length=1_000_000)
 
 
+class BackfillImport(BaseModel):
+    name: str = Field(min_length=1, max_length=180)
+    csv: str = Field(min_length=1, max_length=1_000_000)
+
+
 class Run(BaseModel):
     dataset_id: int = Field(gt=0)
+    backfill_id: int | None = Field(default=None, gt=0)
     options: dict = Field(default_factory=dict)
 
 

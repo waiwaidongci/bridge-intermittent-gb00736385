@@ -2,7 +2,7 @@ from fastapi import HTTPException
 from sqlalchemy import select
 
 from src.models.database import engine, fetch_one
-from src.models.tables import audit, datasets, deliveries, runs, schedules
+from src.models.tables import audit, backfills, datasets, deliveries, runs, schedules
 
 
 def list_rows(table, fields=None, limit=100):
@@ -14,6 +14,11 @@ def list_rows(table, fields=None, limit=100):
 def revisions():
     columns = [field for field in datasets.c if field.name != 'records']
     return list_rows(datasets, columns)
+
+
+def backfill_batches():
+    columns = [field for field in backfills.c if field.name != 'records']
+    return list_rows(backfills, columns)
 
 
 def require_row(table, key, label):
